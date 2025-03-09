@@ -4,6 +4,10 @@ import mqtt from 'mqtt';
 
 function App() {
   const [status, setStatus] = useState("");
+  const [lastCommandTime, setLastCommandTime] = useState(0);
+  const [cooldown, setCooldown] = useState(0);
+  const [mqttClient, setMqttClient] = useState(null); // Añadir este estado
+  const cooldownTime = 5; // Reducido a 5 segundos entre comandos
 
   // Dirección IP del ESP32 en modo AP
   const ipAddress = "http://192.168.4.1"; // Cambia a la IP del ESP32
@@ -14,31 +18,59 @@ function App() {
   const mqttPassword = "admin";
   const topic = "carro/estado";
 
+  // Efecto para la conexión MQTT
   useEffect(() => {
     const client = mqtt.connect(mqttBroker, {
       username: mqttUser,
       password: mqttPassword,
     });
-
+    
     client.on("connect", () => {
-      console.log("Conectado a MQTT");
+      console.log("Conectado al broker MQTT");
       client.subscribe(topic);
     });
-
+    
     client.on("message", (receivedTopic, message) => {
       if (receivedTopic === topic) {
-        setStatus(message.toString()); // Actualiza el estado con el mensaje recibido
+        setStatus(message.toString());
       }
     });
-
+    
+    // Guardar el cliente MQTT en el estado
+    setMqttClient(client);
+    
     return () => {
-      client.end(); // Cierra la conexión cuando el componente se desmonta
+      if (client) client.end();
     };
   }, []);
 
+  // Efecto para actualizar el tiempo de espera
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, lastCommandTime + (cooldownTime * 1000) - Date.now());
+      setCooldown(Math.ceil(remaining / 1000));
+    }, 100);
+    
+    return () => clearInterval(timer);
+  }, [lastCommandTime, cooldown]);
+
+  // Función para verificar si se puede enviar un comando
+  const canSendCommand = () => {
+    return Date.now() - lastCommandTime >= cooldownTime * 1000;
+  };
+
   // Funciones para hacer peticiones HTTP al ESP32 y enviar comandos por MQTT
   const sendCommand = async (command) => {
+    if (!canSendCommand()) {
+      setStatus(`Espera ${cooldown} segundos antes de enviar otro comando`);
+      return;
+    }
+
     try {
+      setLastCommandTime(Date.now());
+      setCooldown(cooldownTime);
       const response = await fetch(`${ipAddress}/${command}`);
       const text = await response.text();
       setStatus(text); // Actualiza el estado con la respuesta del ESP32
@@ -47,15 +79,28 @@ function App() {
     }
   };
 
+  // Función para enviar comandos MQTT usando el cliente persistente
   const sendMQTTCommand = (command) => {
-    const client = mqtt.connect(mqttBroker, {
-      username: mqttUser,
-      password: mqttPassword,
-    });
-    client.on("connect", () => {
-      client.publish("carro/control", command);
-      client.end();
-    });
+    if (!canSendCommand()) {
+      return; // No enviamos el comando MQTT si estamos en cooldown
+    }
+    
+    if (mqttClient && mqttClient.connected) {
+      setLastCommandTime(Date.now());
+      setCooldown(cooldownTime);
+      mqttClient.publish("carro/control", command);
+      setStatus(`Comando enviado: ${command}`);
+    } else {
+      setStatus("Error: No hay conexión MQTT");
+    }
+  };
+
+  // Función combinada para enviar comandos
+  const handleCommand = (command) => {
+    if (canSendCommand()) {
+      // sendCommand(command);
+      sendMQTTCommand(command);
+    }
   };
 
   return (
@@ -63,12 +108,24 @@ function App() {
       <div className="max-w-md mx-auto bg-white rounded-xl shadow-lg overflow-hidden p-6">
         <h1 className="text-3xl font-bold text-center text-gray-800 mb-8">Control del Carro RC</h1>
         
+        {/* Indicador de cooldown */}
+        {cooldown > 0 && (
+          <div className="mb-4 bg-blue-100 text-blue-700 px-4 py-2 rounded-md text-center">
+            Siguiente comando disponible en: <span className="font-bold">{cooldown}s</span>
+          </div>
+        )}
+        
         <div className="grid grid-cols-3 gap-4 mb-8 max-w-xs mx-auto">
           <div className="col-span-1"></div>
           <div className="col-span-1">
             <button 
-              onClick={() => { sendCommand('adelante'); sendMQTTCommand('adelante'); }}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-6 px-6 rounded-lg shadow-md active:translate-y-0.5 active:shadow-sm transition-all"
+              onClick={() => handleCommand('adelante')}
+              disabled={!canSendCommand()}
+              className={`w-full text-white font-bold py-6 px-6 rounded-lg shadow-md transition-all ${
+                canSendCommand() 
+                  ? "bg-blue-500 hover:bg-blue-600 active:translate-y-0.5 active:shadow-sm" 
+                  : "bg-blue-300 cursor-not-allowed"
+              }`}
             >
               🔼
             </button>
@@ -77,35 +134,54 @@ function App() {
           
           <div className="col-span-1">
             <button 
-              onClick={() => { sendCommand('izquierda'); sendMQTTCommand('izquierda'); }}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-6 px-6 rounded-lg shadow-md active:translate-x-0.5 active:shadow-sm transition-all"
+              onClick={() => handleCommand('izquierda')}
+              disabled={!canSendCommand()}
+              className={`w-full text-white font-bold py-6 px-6 rounded-lg shadow-md transition-all ${
+                canSendCommand() 
+                  ? "bg-blue-500 hover:bg-blue-600 active:translate-x-0.5 active:shadow-sm" 
+                  : "bg-blue-300 cursor-not-allowed"
+              }`}
             >
               ◀️
             </button>
           </div>
           <div className="col-span-1">
             <button 
-              onClick={() => { sendCommand('stop'); sendMQTTCommand('stop'); }}
-              className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-6 px-6 rounded-lg shadow-md active:scale-95 active:shadow-sm transition-all"
+              onClick={() => handleCommand('stop')}
+              disabled={!canSendCommand()}
+              className={`w-full text-white font-bold py-6 px-6 rounded-lg shadow-md transition-all ${
+                canSendCommand() 
+                  ? "bg-red-500 hover:bg-red-600 active:scale-95 active:shadow-sm" 
+                  : "bg-red-300 cursor-not-allowed"
+              }`}
             >
               ⏹️
             </button>
           </div>
           <div className="col-span-1">
             <button 
-              onClick={() => { sendCommand('derecha'); sendMQTTCommand('derecha'); }}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-6 px-6 rounded-lg shadow-md active:translate-x-0.5 active:shadow-sm transition-all"
+              onClick={() => handleCommand('derecha')}
+              disabled={!canSendCommand()}
+              className={`w-full text-white font-bold py-6 px-6 rounded-lg shadow-md transition-all ${
+                canSendCommand() 
+                  ? "bg-blue-500 hover:bg-blue-600 active:translate-x-0.5 active:shadow-sm" 
+                  : "bg-blue-300 cursor-not-allowed"
+              }`}
             >
               ▶️
             </button>
           </div>
           
-          {/* Tercera fila - Solo botón atrás */}
           <div className="col-span-1"></div>
           <div className="col-span-1">
             <button 
-              onClick={() => { sendCommand('atras'); sendMQTTCommand('atras'); }}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-6 px-6 rounded-lg shadow-md active:translate-y-0.5 active:shadow-sm transition-all"
+              onClick={() => handleCommand('atras')}
+              disabled={!canSendCommand()}
+              className={`w-full text-white font-bold py-6 px-6 rounded-lg shadow-md transition-all ${
+                canSendCommand() 
+                  ? "bg-blue-500 hover:bg-blue-600 active:translate-y-0.5 active:shadow-sm" 
+                  : "bg-blue-300 cursor-not-allowed"
+              }`}
             >
               🔽
             </button>
@@ -113,7 +189,7 @@ function App() {
           <div className="col-span-1"></div>
         </div>
 
-        {/* Status Panel - Mejorado */}
+        {/* Status Panel */}
         <div className="bg-gradient-to-r from-gray-50 to-gray-100 rounded-lg p-5 shadow-inner">
           <h3 className="text-xl font-semibold text-gray-700 mb-3">Estado del Carro:</h3>
           <div className="bg-white p-3 rounded-lg border border-gray-200 min-h-[60px] flex items-center">
@@ -123,6 +199,6 @@ function App() {
       </div>
     </div>
   );
-}
+} 
 
-export default App;
+export default App; 
